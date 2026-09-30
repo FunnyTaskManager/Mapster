@@ -234,51 +234,97 @@ local WORLDMAP_POI_MIN_Y = -12
 local WORLDMAP_POI_MAX_X     -- changes based on current scale, see WorldMapFrame_SetPOIMaxBounds
 local WORLDMAP_POI_MAX_Y     -- changes based on current scale, see WorldMapFrame_SetPOIMaxBounds
 
+local iconRefreshFrame = CreateFrame("Frame")
+local iconRefreshPending
+local iconRefreshTries = 0
+
+local function detailMapScale()
+	local scale = WorldMapDetailFrame:GetScale()
+	if not scale or scale <= 0 then
+		scale = WORLDMAP_SETTINGS.size
+	end
+	if not scale or scale <= 0 then
+		scale = 1
+	end
+	return scale
+end
+
+function Mapster:RefreshMapIconsSoon()
+	if iconRefreshPending or iconRefreshTries >= 5 then
+		return
+	end
+	iconRefreshTries = iconRefreshTries + 1
+	iconRefreshPending = true
+	iconRefreshFrame:SetScript("OnUpdate", function(self)
+		self:SetScript("OnUpdate", nil)
+		iconRefreshPending = false
+		if not WorldMapFrame:IsShown() then
+			return
+		end
+		EncounterJournal_AddMapButtons()
+		WorldMapFrame_UpdateQuests()
+	end)
+end
+
 function Mapster:WorldMapFrame_DisplayQuestPOI(questFrame, isComplete)
-	-- Recalculate Position to adjust for Scale
+	-- WorldMapPOIFrame is not scaled with the detail frame, so coordinates
+	-- follow that scale. poiScale only changes the icon size.
 	local _, posX, posY = QuestPOIGetIconInfo(questFrame.questId)
-	if posX and posY then
-		local POIscale = WORLDMAP_SETTINGS.size
-		posX = posX * WorldMapDetailFrame:GetWidth() * POIscale
-		posY = -posY * WorldMapDetailFrame:GetHeight() * POIscale
+	if posX and posY and questFrame.poiIcon then
+		local POIscale = detailMapScale()
+		local width = WorldMapDetailFrame:GetWidth()
+		local height = WorldMapDetailFrame:GetHeight()
+		if not width or width <= 0 or not height or height <= 0 then
+			self:RefreshMapIconsSoon()
+			return
+		end
+		posX = posX * width * POIscale
+		posY = -posY * height * POIscale
 
 		-- keep outlying POIs within map borders
-		if ( posY > WORLDMAP_POI_MIN_Y ) then
-			posY = WORLDMAP_POI_MIN_Y
-		elseif ( posY < WORLDMAP_POI_MAX_Y ) then
-			posY = WORLDMAP_POI_MAX_Y
+		if WORLDMAP_POI_MAX_X and WORLDMAP_POI_MAX_Y then
+			if ( posY > WORLDMAP_POI_MIN_Y ) then
+				posY = WORLDMAP_POI_MIN_Y
+			elseif ( posY < WORLDMAP_POI_MAX_Y ) then
+				posY = WORLDMAP_POI_MAX_Y
+			end
+			if ( posX < WORLDMAP_POI_MIN_X ) then
+				posX = WORLDMAP_POI_MIN_X
+			elseif ( posX > WORLDMAP_POI_MAX_X ) then
+				posX = WORLDMAP_POI_MAX_X
+			end
 		end
-		if ( posX < WORLDMAP_POI_MIN_X ) then
-			posX = WORLDMAP_POI_MIN_X
-		elseif ( posX > WORLDMAP_POI_MAX_X ) then
-			posX = WORLDMAP_POI_MAX_X
-		end
-		questFrame.poiIcon:SetPoint("CENTER", "WorldMapPOIFrame", "TOPLEFT", posX / db.poiScale, posY / db.poiScale)
+		questFrame.poiIcon:ClearAllPoints()
+		questFrame.poiIcon:SetPoint("CENTER", "WorldMapPOIFrame", "TOPLEFT", posX, posY)
 		questFrame.poiIcon:SetScale(db.poiScale)
 	end
 end
 
 function Mapster:WorldMapFrame_SetPOIMaxBounds()
-	WORLDMAP_POI_MAX_Y = WorldMapDetailFrame:GetHeight() * -WORLDMAP_SETTINGS.size + 12;
-	WORLDMAP_POI_MAX_X = WorldMapDetailFrame:GetWidth() * WORLDMAP_SETTINGS.size + 12;
+	local scale = detailMapScale()
+	WORLDMAP_POI_MAX_Y = WorldMapDetailFrame:GetHeight() * -scale + 12;
+	WORLDMAP_POI_MAX_X = WorldMapDetailFrame:GetWidth() * scale + 12;
 end
 
 function Mapster:EncounterJournal_AddMapButtons()
-	local scale = WorldMapDetailFrame:GetScale();
-	local width = WorldMapDetailFrame:GetWidth() * scale / db.ejScale
-	local height = WorldMapDetailFrame:GetHeight() * scale / db.ejScale
+	-- Boss buttons live inside the already scaled detail frame. Repositioning
+	-- them by that scale, or by 1/ejScale, shifts them across the map.
+	-- ejScale only changes the icon size. Coordinates stay with Blizzard,
+	-- including the journal difficulty passed to EJ_GetMapEncounter.
+	local width = WorldMapDetailFrame:GetWidth()
+	local height = WorldMapDetailFrame:GetHeight()
+	if not width or width <= 0 or not height or height <= 0 or not WorldMapBossButtonFrame:GetLeft() then
+		self:RefreshMapIconsSoon()
+		return
+	end
+	iconRefreshTries = 0
 
 	local index = 1
-	local x, y, instanceID, name, description, encounterID = EJ_GetMapEncounter(index)
-
-	while name do
-		local bossButton = _G["EJMapButton"..index]
-		if bossButton then
-			bossButton:SetPoint("CENTER", WorldMapBossButtonFrame, "BOTTOMLEFT", x * width, (1 - y) * height)
-			bossButton:SetScale(db.ejScale)
-		end
+	local bossButton = _G["EJMapButton"..index]
+	while bossButton do
+		bossButton:SetScale(db.ejScale)
 		index = index + 1
-		x, y, instanceID, name, description, encounterID = EJ_GetMapEncounter(index)
+		bossButton = _G["EJMapButton"..index]
 	end
 end
 
@@ -476,9 +522,12 @@ function wmfOnShow(frame)
 	if WORLDMAP_SETTINGS.selectedQuest then
 		WorldMapFrame_SelectQuestFrame(WORLDMAP_SETTINGS.selectedQuest)
 	end
+	-- The first update after login can run before the dungeon map id is ready.
+	Mapster:RefreshMapIconsSoon()
 end
 
 function wmfOnHide(frame)
+	iconRefreshTries = 0
 	SetMapToCurrentZone()
 	if BattlefieldMinimap then
 		BattlefieldMinimap:SetScript("OnUpdate", oldBFMOnUpdate or BattlefieldMinimap_OnUpdate)
